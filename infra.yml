@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template para Auto Scaling Group usando Launch Template existente'
+
+Parameters:
+  LaunchTemplateId:
+    Type: String
+    Default: lt-02d718f83c11fb391
+    Description: ID del Launch Template existente
+
+Resources:
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: asg-salp
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplateId
+        Version: '1'
+      VPCZoneIdentifier:
+        - subnet-015d5b709ea188f60
+        - subnet-0d15ae4702750cd95
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: Web Server - SALP
+          PropagateAtLaunch: true
+
+Outputs:
+  AutoScalingGroupName:
+    Description: Nombre del Auto Scaling Group
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AutoScalingGroupName'
+
+  LaunchTemplateId:
+    Description: ID del Launch Template usado
+    Value: !Ref LaunchTemplateId
+    Export:
+      Name: !Sub '${AWS::StackName}-LaunchTemplateId'
