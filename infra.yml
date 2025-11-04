@@ -1,42 +1,299 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'CloudFormation template para Auto Scaling Group usando Launch Template existente'
+Description: |
+  Infraestructura completa con ALB, Auto Scaling, Launch Template propio, instancias EC2 y configuración web.
 
 Parameters:
-  LaunchTemplateId:
+  LatestAmiId:
     Type: String
-    Default: lt-02d718f83c11fb391
-    Description: ID del Launch Template existente
+    Default: ami-01ff0413d08899e5f # ID AMI más reciente
+    Description: AMI más reciente de Amazon Linux 2023.
+
+  VpcId:
+    Type: String
+    Default: vpc-04550a0fafacf51cb
+    Description: ID de la VPC por defecto.
+
+  SubnetId:
+    Type: String
+    Description: ID de la subred pública en la VPC por defecto.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Tipo de instancia EC2.
+
+  InstanceName:
+    Type: String
+    Default: santiago
+    Description: Nombre de la instancia EC2.
+
+  SecurityGroupId:
+    Type: String
+    Default: sg-07b2016a9c30fe9ca
+    Description: ID del grupo de seguridad por defecto de la VPC.
+
+  LaunchTemplateName:
+    Type: String
+    Default: lt-santiago
+    Description: Nombre del Launch Template para EC2.
+
+  AutoScalingGroupName:
+    Type: String
+    Default: asg-santiago
+    Description: Nombre del Auto Scaling Group.
+
+  MinSize:
+    Type: String
+    Default: '1'
+    Description: Tamaño mínimo del grupo de autoescalado.
+
+  MaxSize:
+    Type: String
+    Default: '1'
+    Description: Tamaño máximo del grupo de autoescalado.
+
+  DesiredCapacity:
+    Type: String
+    Default: '1'
+    Description: Capacidad deseada del grupo de autoescalado.
+
+  Subnet1:
+    Type: String
+    Default: subnet-015d5b709ea188f60
+    Description: ID de la primera subred pública.
+
+  Subnet2:
+    Type: String
+    Default: subnet-0d15ae4702750cd95
+    Description: ID de la segunda subred pública.
+
+  TagName:
+    Type: String
+    Default: Web Server - Santiago
+    Description: Valor de la etiqueta Name para instancias EC2.
 
 Resources:
-  AutoScalingGroup:
+  # Rol IAM mínimo para EC2
+  Ec2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # Permiso mínimo para administración
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Ec2InstanceRole
+
+  # Instancia EC2 en VPC por defecto
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet:
+            - !Ref SecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+      UserData: !Base64 |
+        #!/bin/bash
+        set -e
+        yum update -y
+        yum install -y httpd php
+        systemctl enable httpd
+        systemctl start httpd
+        # Obtener token IMDSv2
+        TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
+        if [ -n "$TOKEN" ]; then
+          PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+          PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4 || true)
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone || true)
+        else
+          PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+          PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4 || true)
+          AZ=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone || true)
+        fi
+        # Valores por defecto si están vacíos
+        PUBLIC_IP=${PUBLIC_IP:-N/A}
+        PRIVATE_IP=${PRIVATE_IP:-N/A}
+        AZ=${AZ:-N/A}
+        cat > /var/www/html/index.php <<EOF
+        <?php
+        echo "<h1>Instancia EC2 Apache + PHP</h1>";
+        echo "<p><b>IP Pública:</b> $PUBLIC_IP</p>";
+        echo "<p><b>IP Privada:</b> $PRIVATE_IP</p>";
+        echo "<p><b>Zona de disponibilidad:</b> $AZ</p>";
+        ?>
+        EOF
+
+  Ec2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Ref LaunchTemplateName
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt Ec2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+          - !Ref InstanceSecurityGroup
+        UserData: !Base64 |
+          #!/bin/bash
+          set -e
+          yum update -y
+          yum install -y httpd php
+          systemctl enable httpd
+          systemctl start httpd
+          # Obtener token IMDSv2
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
+          if [ -n "$TOKEN" ]; then
+            PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+            PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4 || true)
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone || true)
+          else
+            PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+            PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4 || true)
+            AZ=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone || true)
+          fi
+          # Valores por defecto si están vacíos
+          PUBLIC_IP=${PUBLIC_IP:-N/A}
+          PRIVATE_IP=${PRIVATE_IP:-N/A}
+          AZ=${AZ:-N/A}
+          cat >/var/www/html/index.php <<EOF
+          <?php
+          echo "<h1>Instancia EC2 Apache + PHP</h1>";
+          echo "<p><b>IP Pública:</b> $PUBLIC_IP</p>";
+          echo "<p><b>IP Privada:</b> $PRIVATE_IP</p>";
+          echo "<p><b>Zona de disponibilidad:</b> $AZ</p>";
+          ?>
+          EOF
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Ref TagName
+
+  # Security Group para el Application Load Balancer
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB allowing HTTP
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Security Group para instancias: permitir tráfico HTTP desde ALB y SSM
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from ALB and SSM
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  # Application Load Balancer
+  WebALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub alb-${AWS::StackName}
+      Scheme: internet-facing
+      Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub tg-${AWS::StackName}
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: '80'
+      HealthCheckPath: /
+
+  WebListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargetGroup
+
+  Ec2AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      AutoScalingGroupName: asg-salp
-      LaunchTemplate:
-        LaunchTemplateId: !Ref LaunchTemplateId
-        Version: '1'
+      AutoScalingGroupName: !Ref AutoScalingGroupName
       VPCZoneIdentifier:
-        - subnet-015d5b709ea188f60
-        - subnet-0d15ae4702750cd95
-      MinSize: 1
-      MaxSize: 1
-      DesiredCapacity: 1
+        - !Ref Subnet1
+        - !Ref Subnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref Ec2LaunchTemplate
+        Version: !GetAtt Ec2LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
       HealthCheckType: EC2
       HealthCheckGracePeriod: 300
       Tags:
         - Key: Name
-          Value: Web Server - SALP
+          Value: !Ref TagName
           PropagateAtLaunch: true
+      TargetGroupARNs:
+        - !Ref WebTargetGroup
 
 Outputs:
+  Ec2InstanceId:
+    Description: ID de la instancia EC2 creada.
+    Value: !Ref Ec2Instance
+
+  Ec2PublicIp:
+    Description: IP pública de la instancia EC2.
+    Value: !GetAtt Ec2Instance.PublicIp
+
+  AlbDNSName:
+    Description: DNS name del Application Load Balancer
+    Value: !GetAtt WebALB.DNSName
+
   AutoScalingGroupName:
     Description: Nombre del Auto Scaling Group
-    Value: !Ref AutoScalingGroup
+    Value: !Ref Ec2AutoScalingGroup
     Export:
-      Name: !Sub '${AWS::StackName}-AutoScalingGroupName'
+      Name: !Sub ${AWS::StackName}-AutoScalingGroupName
 
   LaunchTemplateId:
     Description: ID del Launch Template usado
-    Value: !Ref LaunchTemplateId
+    Value: !Ref Ec2LaunchTemplate
     Export:
-      Name: !Sub '${AWS::StackName}-LaunchTemplateId'
+      Name: !Sub ${AWS::StackName}-LaunchTemplateId
